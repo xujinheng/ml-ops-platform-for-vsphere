@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    component: gpu-scheduler
+  name: gpu-scheduler
+  namespace: gpu-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      component: gpu-scheduler
+  template:
+    metadata:
+      labels:
+        component: gpu-scheduler
+    spec:
+      containers:
+      - name: kubeflow-worker
+        image: projects.registry.vmware.com/kubeflow/supervisor-service-worker-pod:gpu-poc-0.2
+        imagePullPolicy: Always
+        workingDir: "/app"
+        command: ["/bin/bash", "-c", "sleep infinity"]
+        volumeMounts:
+          - mountPath: /etc/config
+            name: config-volume
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            memory: 128Mi
+      serviceAccountName: gpu-scheduler-service-account
+      volumes:
+      - configMap:
+          name: gpu-scheduler-config
+        name: config-volume
+--- 
+apiVersion: v1
+data:
+  gpu-scheduler-config.yaml: |
+    apiVersion: controller-runtime.sigs.k8s.io/v1alpha1
+    kind: ControllerManagerConfig
+    lalala: tkc
+    health:
+      healthProbeBindAddress: :8081
+    metrics:
+      bindAddress: 127.0.0.1:8080
+
+    leaderElection:
+      leaderElect: true
+      resourceName: 811c9dc5.vmware.com
+kind: ConfigMap
+metadata:
+  name: gpu-scheduler-config
+  namespace: gpu-scheduler
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpu-scheduler-service-account
+  namespace: gpu-scheduler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    component: gpu-scheduler
+  name: gpu-scheduler
+rules:
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
+- nonResourceURLs:
+  - '*'
+  verbs:
+  - '*'
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    component: gpu-scheduler
+  name: gpu-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gpu-scheduler
+subjects:
+- kind: ServiceAccount
+  name: gpu-scheduler-service-account
+  namespace: gpu-scheduler
