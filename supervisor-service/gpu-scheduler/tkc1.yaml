@@ -1,0 +1,71 @@
+apiVersion: run.tanzu.vmware.com/v1alpha3
+kind: TanzuKubernetesCluster                  
+metadata:
+  name: tkc-for-gpu-scheduler-only-1
+  namespace: tkg-ns-auto
+  annotations:
+    run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
+spec:
+  distribution:
+    fullVersion: v1.23.8+vmware.2-tkg.2-zshippable
+  topology:
+    controlPlane:
+      replicas: 1
+      vmClass: guaranteed-large
+      storageClass: k8s-storage-policy
+      tkr:
+        reference:
+          name: v1.23.8---vmware.2-tkg.2-zshippable
+    nodePools:
+    - replicas: 2
+      name: np-2
+      vmClass: vgpu-v100-8c
+      storageClass: k8s-storage-policy
+      tkr:
+        reference:
+          name: v1.23.8---vmware.2-tkg.2-zshippable
+      volumes:
+      - capacity:
+          storage: 70Gi
+        mountPath: /var/lib/containerd
+        name: containerd
+      - capacity:
+          storage: 70Gi
+        mountPath: /var/lib/kubelet
+        name: kubelet
+  settings:
+    network:
+      cni:
+        name: antrea
+      services:
+        cidrBlocks:
+        - 198.51.100.0/12
+      pods:
+        cidrBlocks:
+        - 192.0.2.0/16
+      serviceDomain: cluster.local
+    storage:
+      classes: ["k8s-storage-policy"]             
+      defaultClass: k8s-storage-policy
+---
+apiVersion: vmoperator.vmware.com/v1alpha1
+kind: VirtualMachineClass
+metadata:
+  name: vgpu-v100-8c
+  namespace: tkg-ns-auto
+spec:
+  hardware:
+    cpus: 8
+    devices:
+      vgpuDevices:
+      - profileName: grid_v100-8c
+    instanceStorage: {}
+    memory: 12Gi
+  policies:
+    resources:
+      limits:
+        cpu: "0"
+        memory: "0"
+      requests:
+        cpu: "0"
+        memory: 12Gi
