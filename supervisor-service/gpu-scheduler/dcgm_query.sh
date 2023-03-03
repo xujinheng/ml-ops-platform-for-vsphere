@@ -1,4 +1,3 @@
-cat << 'EOF' > dcgm_query.sh
 #!/bin/bash
 dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 cd "$dir"
@@ -14,6 +13,3 @@ for dcgm_pod in "${dcgm_pods_array[@]}"; do
     kill -9 $pid >/dev/null 2>&1
     sleep 1
 done
-
-EOF
-chmod +x dcgm_query.sh

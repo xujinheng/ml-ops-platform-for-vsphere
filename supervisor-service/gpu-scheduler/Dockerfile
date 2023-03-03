@@ -20,4 +20,5 @@ ENV HTTP_PROXY=
 ENV https_proxy=
 ENV HTTPS_PROXY=
 
+COPY . ./
 # docker build -t projects.registry.vmware.com/kubeflow/gpu-scheduler:0.2 .
