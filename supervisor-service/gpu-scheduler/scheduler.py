@@ -6,6 +6,7 @@ import base64
 import os
 import subprocess
 import re
+import time
 
 workdir='/app'
 
@@ -51,14 +52,14 @@ def query_gcdm():
             })
     return gcdm_info
 
-def query_gpu_demand():
+def query_gpu_demand(kubeconfig_path):
     command = "kubectl get pods -A -o yaml --kubeconfig=" + kubeconfig_path
     process = subprocess.Popen(command.split(), stdout=subprocess.PIPE)
     output, error = process.communicate()
     pods = yaml.load(output.decode(), Loader=yaml.FullLoader)
     GPU_demand = []
     for index, pod in enumerate(pods['items']):
-        if pod['status']['phase'] == "Pending":
+        if pod['status']['phase'] == "Pending" and "gpu-scheduled" not in pod['metadata']['annotations']:
             for condition in pod['status']['conditions']:
                 if condition['type'] == 'PodScheduled' and condition['status'] == 'False' and condition['reason'] == 'Unschedulable' and \
                     re.search("0/[0-9]+ nodes are available:.*?[0-9]+ Insufficient nvidia.com/gpu", condition['message']):
@@ -104,7 +105,7 @@ def patch_tkc(GPU_product, GPU_count, tkc):
                 {"capacity": {"storage": "70Gi"}, "mountPath": "/var/lib/kubelet", "name": "kubelet"},
             ]
         }
-        while list(filter(lambda d: d['name'] in nodePool_template['name'], tkc_yaml['spec']['topology']['nodePools'])):
+        while list(filter(lambda d: d['name'] == nodePool_template['name'], tkc_yaml['spec']['topology']['nodePools'])):
             nodePool_template['name'] = nodePool_template['name'] + "1"
         tkc_yaml['spec']['topology']['nodePools'].append(nodePool_template)
         tkc_yaml_patch = {
@@ -121,21 +122,43 @@ def patch_tkc(GPU_product, GPU_count, tkc):
         output, error = process.communicate()
         return output
 
+def annotate_pod(GPU_demand, kubeconfig_path):
+    for GPU_demand_item in GPU_demand:
+        command = "kubectl annotate pod {} -n {} gpu-scheduled=True --kubeconfig={}".format(GPU_demand_item['name'], GPU_demand_item['namespace'], kubeconfig_path)
+        process = subprocess.Popen(command.split(), stdout=subprocess.PIPE)
+        output, error = process.communicate()
+        print(output, error)
+
 config = read_config()
 
-for tkc in config['tkc'][:1]:
-    kubeconfig_path = get_tkc_secret(tkc)
+while True:
+    print('%s'%time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) 
+    for tkc in config['tkc'][:1]:
+        print("Get kubeconfig for {} -n {}".format(tkc["tkcName"], tkc["tkcNamespace"]))
+        kubeconfig_path = get_tkc_secret(tkc)
+        print("Get GPU demand")
+        GPU_demand = query_gpu_demand(kubeconfig_path)
+        print(GPU_demand)
+        print("Get GPU GPU_supply")
+        GPU_supply = query_gcdm()
+        print(GPU_supply)
+        # Assumption: GPU_count for GPU_demand is always 1, which leads to two cases
+        # #1: GPU_demands is empty list, nothing to do
+        # #2: GPU_demands is not empty, while GPU_supply is fully used.
+        print("compute GPU node demand")
+        GPU_node_demand = compute_GPU_node_demand(GPU_demand, GPU_supply)
+        print(GPU_node_demand)
+        if GPU_node_demand:
+            print("patch tkc")
+            for GPU_product, GPU_count in GPU_node_demand.items():
+                output = patch_tkc(GPU_product, GPU_count, tkc)
+                print(output)
+        print("annotate scheduled pods")
+        print(GPU_demand)
+        annotate_pod(GPU_demand, kubeconfig_path)
+    print("sleep for 30sec")
+    time.sleep(30)
     
-    GPU_demand = query_gpu_demand()
-    GPU_supply = query_gcdm()
-
-    # Assumption: GPU_count for GPU_demand is always 1, which leads to two cases
-    # #1: GPU_demands is empty list, nothing to do
-    # #2: GPU_demands is not empty, while GPU_supply is fully used.
-    GPU_node_demand = compute_GPU_node_demand(GPU_demand, GPU_supply)
-
-    for GPU_product, GPU_count in GPU_node_demand.items():
-        output = patch_tkc(GPU_product, GPU_count, tkc)
 
 
 # kubectl get pods -o=jsonpath='{.items[?(@.status.phase=="Pending"&&@.status.qosClass=="BestEffort")]}'
