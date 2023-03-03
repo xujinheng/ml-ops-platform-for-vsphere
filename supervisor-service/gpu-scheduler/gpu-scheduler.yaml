@@ -6,6 +6,7 @@ metadata:
   name: gpu-scheduler
   namespace: gpu-scheduler
 spec:
+  # leader election ?
   replicas: 1
   selector:
     matchLabels:
