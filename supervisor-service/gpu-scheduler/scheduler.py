@@ -130,36 +130,44 @@ def annotate_pod(GPU_demand, kubeconfig_path):
         print(output, error)
 
 config = read_config()
+print("Read Config file:")
+print(config)
+print("\n\n")
 
 while True:
+    print("\n" + "=" * 30)
     print('%s'%time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) 
-    for tkc in config['tkc'][:1]:
-        print("Get kubeconfig for {} -n {}".format(tkc["tkcName"], tkc["tkcNamespace"]))
+    for tkc in config['tkc']:
+        print("\n" + "-" * 15)
+        print("1. Get kubeconfig for tkc {} -n {}".format(tkc["tkcName"], tkc["tkcNamespace"]))
         kubeconfig_path = get_tkc_secret(tkc)
-        print("Get GPU demand")
+        print("2. Get GPU demand")
         GPU_demand = query_gpu_demand(kubeconfig_path)
         print(GPU_demand)
-        print("Get GPU GPU_supply")
+        print("3. Get GPU GPU_supply")
         GPU_supply = query_gcdm()
         print(GPU_supply)
         # Assumption: GPU_count for GPU_demand is always 1, which leads to two cases
         # #1: GPU_demands is empty list, nothing to do
         # #2: GPU_demands is not empty, while GPU_supply is fully used.
-        print("compute GPU node demand")
+        print("4. Compute GPU node demand")
         GPU_node_demand = compute_GPU_node_demand(GPU_demand, GPU_supply)
         print(GPU_node_demand)
         if GPU_node_demand:
-            print("patch tkc")
+            print("* GPU_node_demand exist:")
+            print("5. Patch tkc")
             for GPU_product, GPU_count in GPU_node_demand.items():
+                print("Add {} {} for tkc {} -n {}".format(GPU_count, GPU_product, tkc["tkcName"], tkc["tkcNamespace"]))
                 output = patch_tkc(GPU_product, GPU_count, tkc)
                 print(output)
-        print("annotate scheduled pods")
-        print(GPU_demand)
-        annotate_pod(GPU_demand, kubeconfig_path)
+            print("6. Annotate gpu-scheduled=True to scheduled pods")
+            print(GPU_demand)
+            annotate_pod(GPU_demand, kubeconfig_path)
+        else:
+            print("* GPU_node_demand is empty, nothing to do")
     print("sleep for 30sec")
     time.sleep(30)
     
-
 
 # kubectl get pods -o=jsonpath='{.items[?(@.status.phase=="Pending"&&@.status.qosClass=="BestEffort")]}'
 

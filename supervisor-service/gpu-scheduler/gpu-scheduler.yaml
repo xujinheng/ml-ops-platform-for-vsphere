@@ -21,7 +21,7 @@ spec:
         image: projects.registry.vmware.com/kubeflow/gpu-scheduler:0.2
         imagePullPolicy: Always
         workingDir: "/app"
-        command: ["/bin/bash", "-c", "sleep infinity"]
+        command: ["/bin/bash", "-c", "python3 -u scheduler.py"]
         volumeMounts:
           - mountPath: /etc/config
             name: config-volume

@@ -7,7 +7,7 @@ ENV https_proxy http://proxy.vmware.com:3128
 ENV HTTPS_PROXY http://proxy.vmware.com:3128
 
 RUN apt update && \
-    apt install -y curl && \
+    apt install -y curl vim lsof && \
     apt clean
 
 RUN curl -LO https://dl.k8s.io/release/v1.21.0/bin/linux/amd64/kubectl && \
@@ -21,4 +21,3 @@ ENV https_proxy=
 ENV HTTPS_PROXY=
 
 COPY . ./
-# docker build -t projects.registry.vmware.com/kubeflow/gpu-scheduler:0.2 .
