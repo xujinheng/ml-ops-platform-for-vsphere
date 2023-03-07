@@ -10,3 +10,33 @@ metadata:
     #@overlay/match missing_ok=True
     k8s.twr.io/imageswap: enabled
 #@ end
+
+#@ def relocate(left, right):
+#@   if left.startswith(right):
+#@     return left
+#@   else:
+#@     return right + left
+#@   end
+#@ end
+
+#@ deployment = overlay.subset({"kind": "Deployment"})
+#@ statefulset = overlay.subset({"kind": "StatefulSet"})
+#@overlay/match by=overlay.or_op(deployment, statefulset), expects="5+"
+---
+spec:
+  template:
+    spec:
+      containers:
+      #@overlay/match by=overlay.all, expects="1+"
+      - 
+        #@overlay/replace via=relocate
+        image: projects.registry.vmware.com/kubeflow/
+
+#@overlay/match by=overlay.subset({"kind": "ClusterServingRuntime"}), expects="5+"
+---
+spec:
+  containers:
+  #@overlay/match by=overlay.all, expects="1+"
+  - 
+    #@overlay/replace via=relocate
+    image: projects.registry.vmware.com/kubeflow/
