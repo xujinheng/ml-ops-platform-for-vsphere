@@ -22,6 +22,7 @@ spec:
         imagePullPolicy: Always
         workingDir: "/app"
         command: ["/bin/bash", "-c", "python3 -u scheduler.py"]
+        # command: ["/bin/bash", "-c", "sleep infinity"]
         volumeMounts:
           - mountPath: /etc/config
             name: config-volume
