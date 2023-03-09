@@ -169,6 +169,10 @@ def node_destroy_countdown(kubeconfig_path, node_item, empty=True):
         command = "kubectl annotate node {} node-destroy-countdown={} --overwrite --kubeconfig={}".format(node_item, new_count_down, kubeconfig_path)
         output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
 
+# Read configmap defined by VI Admin
+# 1. schedulingMethod: first-come-first-serve [Not implemented]
+# 2. TKCs to monitor
+# 3. vmClass that are allowed [Not implemented]
 config = read_config()
 print("Read Config file:")
 print(config)
@@ -176,15 +180,24 @@ print("\n\n")
 
 while True:
     print("\n" + "=" * 30)
-    print('%s'%time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())) 
+    print('%s'%time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+    # Iteration: Add / Delete GPU nodes for each TKC one by one, should be good enough for now
     for tkc in config['tkc']:
-        # Assumption: GPU_count for GPU_demand is always 1
+        # ASSUMPTION: GPU_count for GPU_demand is always 1, which makes our life easier
+        # In this case, adding GPU nodes only depends on extra GPU_demand
+        #               deleteing GPU nodes only depends on empty GPU_supply
+        # Involved Scenario: extra GPU_demand = 2,  empty GPU_supply = 1 [Not implemented]
         print("\n" + "-" * 15)
         print("0. Get kubeconfig for tkc {} -n {}".format(tkc["tkcName"], tkc["tkcNamespace"]))
         kubeconfig_path = get_tkc_secret(tkc)
+        # find all the pods that satisfies:
+        # 1. status phase: Pending
+        # 2. status condition: Unschedulable, with Insufficient nvidia.com/gpu in the message
+        # 3. gpu-scheduled not in metadata annotations: prevent repeatedly adding GPU nodes for the same pod
         print("1.1. Get GPU demand")
         GPU_demand = query_gpu_demand(kubeconfig_path)
         print(GPU_demand)
+        # Get the number of GPU_node_demand for each GPU profile (vmClass)
         print("1.2. Compute GPU node demand")
         GPU_node_demand = compute_GPU_node_demand(GPU_demand)
         print(GPU_node_demand)
@@ -194,22 +207,38 @@ while True:
             print("1.4. Patch TKC")
             for GPU_product, GPU_count in GPU_node_demand.items():
                 print("Add {} {} for TKC {} -n {}".format(GPU_count, GPU_product, tkc["tkcName"], tkc["tkcNamespace"]))
+                # Add GPU nodes that satisfies:
+                # 1. vmClass: GPU_product [TODO: name mapping issues]
+                # 2. replicas: GPU_count [TODO: replicas should be always 1, so that we can delete any single GPU_node we want]
+                # 3. taints: [{"effect": "NoSchedule", "key": "nvidia.com/gpu", "value": "gpu-scheduler"}], makes it a GPU_dedicated_node for node deletion purpose
                 output = patch_tkc(GPU_product, GPU_count, tkc)
                 print(output)
+            # prevent repeatedly adding GPU nodes for the same pod
             print("1.5. Annotate gpu-scheduled=True to scheduled pods")
             print(GPU_demand)
             annotate_pod(GPU_demand, kubeconfig_path)
         else:
             print("* GPU_node_demand is empty, nothing to do")
 
+        # query GPU_node info from GPU operators [gcdm_exporter], so we can see whether a GPU is being occupied
+        # note the delay:   GPU_node_creation                   ->DELAY 1-> 
+        #                   VM_operators spread to new nodes    ->DELAY 2-> 
+        #                   GPU being occupied (Podscheduled)   ->DELAY 3-> 
+        #                   gcdm_exporter reports the state (so it is not latest info)
         print("2.1 Get GPU GPU_supply")
         GPU_supply = query_gcdm()
         print(GPU_supply)
         print("2.2 Get empty/occupied GPU nodes")
+        # ASSUMPTION: each GPU node has only ONE GPU device
         empty_nodes, occupied_nodes = get_GPU_node_info(kubeconfig_path, GPU_supply)
         print(empty_nodes)
         print(occupied_nodes)
         print("2.3 Annotate nodes with destroy countdown")
+        # How to prevent GPU nodes be destroyed in the DELAY 3, and allowed users to preserve an empty GPU node for a couple of minutes
+        # 1. Add a countdown for empty GPU dedicated GPU, from 10 to 0, makes it a 5-minute countdown
+        # 2. Reset the countdown for occupied nodes to 10
+        # 3. If countdown is 0: delete the nodes [not implemented, need to find a way for one-one mapping from node -> TKC nodepools]
+        # To be Stateless The countdown is in the TKC node annotation [insecure: TKC users have access to modify node annotation]
         [node_destroy_countdown(kubeconfig_path, node_item, True) for node_item in empty_nodes]
         [node_destroy_countdown(kubeconfig_path, node_item, False) for node_item in occupied_nodes]
 
