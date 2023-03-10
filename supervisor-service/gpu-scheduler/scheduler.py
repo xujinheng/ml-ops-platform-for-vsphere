@@ -7,6 +7,8 @@ import os
 import subprocess
 import re
 import time
+import random
+import string
 
 workdir='/app'
 
@@ -33,8 +35,11 @@ def query_gpu_demand(kubeconfig_path):
     pods = yaml.load(output.decode(), Loader=yaml.FullLoader)
     GPU_demand = []
     for index, pod in enumerate(pods['items']):
-        if pod['status']['phase'] == "Pending" and "gpu-scheduled" not in pod['metadata']['annotations']:
+        if pod['status']['phase'] == "Pending" \
+            and "gpu-scheduled" not in pod['metadata']['annotations'] \
+            and "conditions" in pod["status"]:
             for condition in pod['status']['conditions']:
+                # the condition['message'] is not accurate, sometimes there are already some GPU node being created, but can not tell from the message
                 if condition['type'] == 'PodScheduled' and condition['status'] == 'False' and condition['reason'] == 'Unschedulable' and \
                     re.search("0/[0-9]+ nodes are available:.*?[0-9]+ Insufficient nvidia.com/gpu", condition['message']):
                         GPU_demand_pod_item = {}
@@ -59,6 +64,24 @@ def compute_GPU_node_demand(GPU_demand):
             GPU_node_demand[gpu_demand_item['GPU_product']] = int(gpu_demand_item['GPU_count'])
     return GPU_node_demand
 
+def generate_nodePool_template(vmClass, name_excluded):
+    node_name_candidate = None
+    while node_name_candidate is None or node_name_candidate in name_excluded:
+        node_name_candidate = "gpu-scheduler-" + vmClass + '-' + ''.join(random.choice(string.ascii_lowercase + string.digits) for i in range(5))
+    nodePool_template = {
+        "name": node_name_candidate,
+        "replicas": 1,
+        "storageClass": "k8s-storage-policy",
+        "taints": [{"effect": "NoSchedule", "key": "nvidia.com/gpu", "value": "gpu-scheduler"}],
+        "tkr": {"reference": {"name": "v1.23.8---vmware.2-tkg.2-zshippable"}},
+        "vmClass": vmClass,
+        "volumes":[
+            {"capacity": {"storage": "70Gi"}, "mountPath": "/var/lib/containerd", "name": "containerd"},
+            {"capacity": {"storage": "70Gi"}, "mountPath": "/var/lib/kubelet", "name": "kubelet"},
+        ]
+    }
+    return nodePool_template
+
 def patch_tkc(GPU_product, GPU_count, tkc):
     GPU_product_map = {'GRID-V100-4C': 'vgpu-v100-4c', 
                         'GRID-V100-8C': 'vgpu-v100-8c',
@@ -66,21 +89,9 @@ def patch_tkc(GPU_product, GPU_count, tkc):
     command = "kubectl get tkc {} -n {} -o yaml".format(tkc['tkcName'], tkc['tkcNamespace'])
     output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
     tkc_yaml = yaml.load(output.decode(), Loader=yaml.FullLoader)
-    nodePool_template = {
-        "name": "np-" + GPU_product_map[GPU_product],
-        "replicas": GPU_count,
-        "storageClass": "k8s-storage-policy",
-        "taints": [{"effect": "NoSchedule", "key": "nvidia.com/gpu", "value": "gpu-scheduler"}],
-        "tkr": {"reference": {"name": "v1.23.8---vmware.2-tkg.2-zshippable"}},
-        "vmClass": GPU_product_map[GPU_product],
-        "volumes":[
-            {"capacity": {"storage": "70Gi"}, "mountPath": "/var/lib/containerd", "name": "containerd"},
-            {"capacity": {"storage": "70Gi"}, "mountPath": "/var/lib/kubelet", "name": "kubelet"},
-        ]
-    }
-    while list(filter(lambda d: d['name'] == nodePool_template['name'], tkc_yaml['spec']['topology']['nodePools'])):
-        nodePool_template['name'] = nodePool_template['name'] + "1"
-    tkc_yaml['spec']['topology']['nodePools'].append(nodePool_template)
+    for i in range(GPU_count):
+        nodePool_template = generate_nodePool_template(GPU_product_map[GPU_product], [np['name'] for np in tkc_yaml['spec']['topology']['nodePools']])
+        tkc_yaml['spec']['topology']['nodePools'].append(nodePool_template)
     tkc_yaml_patch = {
         "spec": {
             "topology": {
@@ -88,6 +99,7 @@ def patch_tkc(GPU_product, GPU_count, tkc):
             }
         }
     }
+    print(tkc_yaml_patch)
     with open(os.path.join(workdir, 'tkc-patch-file.yaml'), 'w') as f:
         yaml.dump(tkc_yaml_patch, f, default_flow_style=False, allow_unicode=True)
     command = "kubectl patch tkc {} -n {} --type merge --patch-file {}".format(tkc['tkcName'], tkc['tkcNamespace'], os.path.join(workdir, "tkc-patch-file.yaml"))
@@ -135,20 +147,44 @@ def get_GPU_node_info(kubeconfig_path, GPU_supply):
             empty_nodes.append(node_name)
     return empty_nodes, occupied_nodes
 
-def destroy_node(node_item):
+def destroy_node(tkc, node_item):
     print("destroy " + node_item)
+    # how can we make sure the one one mapping between node and nodePool ?
+    command = "kubectl get vm {} -n {}".format(node_item, tkc['tkcNamespace']) + " -o jsonpath='{.metadata.ownerReferences[0].name}'"
+    output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
+    VSphereMachine = output.decode().strip("'")
+    command = "kubectl get VSphereMachine {} -n {} -o yaml".format(VSphereMachine, tkc['tkcNamespace']) + " -o jsonpath='{.metadata.labels.topology\.cluster\.x-k8s\.io/deployment-name}'"
+    output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
+    nodePool_name = output.decode().strip("'")
+    # destroy
+    command = "kubectl get tkc {} -n {} -o yaml".format(tkc['tkcName'], tkc['tkcNamespace'])
+    output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
+    tkc_yaml = yaml.load(output.decode(), Loader=yaml.FullLoader)
+    tkc_yaml_patch = {
+        "spec": {
+            "topology": {
+                "nodePools": [np for np in tkc_yaml['spec']['topology']['nodePools'] if np['name'] != nodePool_name]
+            }
+        }
+    }
+    print(tkc_yaml_patch)
+    with open(os.path.join(workdir, 'tkc-patch-file.yaml'), 'w') as f:
+        yaml.dump(tkc_yaml_patch, f, default_flow_style=False, allow_unicode=True)
+    command = "kubectl patch tkc {} -n {} --type merge --patch-file {}".format(tkc['tkcName'], tkc['tkcNamespace'], os.path.join(workdir, "tkc-patch-file.yaml"))
+    output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
+    return output
 
-def node_destroy_countdown(kubeconfig_path, node_item, empty=True):
+def node_destroy_countdown(kubeconfig_path, tkc, node_item, empty=True):
     print(node_item)
     ANNOTATION_KEY="node-destroy-countdown"
-    COUNT_DOWN = 10
+    COUNT_DOWN = 3
     command = "kubectl get node {} -o yaml --kubeconfig={}".format(node_item, kubeconfig_path)
     output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
     node_yaml = yaml.load(output.decode(), Loader=yaml.FullLoader)
     # filter out non GPU_dedicated nodes
     GPU_dedicated_bool = "taints" in node_yaml['spec'] and list(filter(lambda d: d['key'] == "nvidia.com/gpu", node_yaml['spec']['taints']))
     if not GPU_dedicated_bool:
-        print("Skip the pod for not detecting taints nvidia.com/gpu")
+        print("Skip the node for not detecting taints nvidia.com/gpu")
         return
     # new count down value
     annotation_exist_bool = ANNOTATION_KEY in node_yaml['metadata']['annotations']
@@ -164,7 +200,7 @@ def node_destroy_countdown(kubeconfig_path, node_item, empty=True):
     print("new_count_down_value: " + str(new_count_down))
     # destroy or annotate
     if new_count_down == 0:
-        destroy_node(node_item)
+        destroy_node(tkc, node_item)
     else:
         command = "kubectl annotate node {} node-destroy-countdown={} --overwrite --kubeconfig={}".format(node_item, new_count_down, kubeconfig_path)
         output, error = subprocess.Popen(command.split(), stdout=subprocess.PIPE).communicate()
@@ -231,16 +267,16 @@ while True:
         print("2.2 Get empty/occupied GPU nodes")
         # ASSUMPTION: each GPU node has only ONE GPU device
         empty_nodes, occupied_nodes = get_GPU_node_info(kubeconfig_path, GPU_supply)
-        print(empty_nodes)
-        print(occupied_nodes)
+        print("empty nodes: " + str(empty_nodes))
+        print("occupied nodes: " + str(occupied_nodes))
         print("2.3 Annotate nodes with destroy countdown")
         # How to prevent GPU nodes be destroyed in the DELAY 3, and allowed users to preserve an empty GPU node for a couple of minutes
         # 1. Add a countdown for empty GPU dedicated GPU, from 10 to 0, makes it a 5-minute countdown
         # 2. Reset the countdown for occupied nodes to 10
         # 3. If countdown is 0: delete the nodes [not implemented, need to find a way for one-one mapping from node -> TKC nodepools]
         # To be Stateless The countdown is in the TKC node annotation [insecure: TKC users have access to modify node annotation]
-        [node_destroy_countdown(kubeconfig_path, node_item, True) for node_item in empty_nodes]
-        [node_destroy_countdown(kubeconfig_path, node_item, False) for node_item in occupied_nodes]
+        [node_destroy_countdown(kubeconfig_path, tkc, node_item, True) for node_item in empty_nodes]
+        [node_destroy_countdown(kubeconfig_path, tkc, node_item, False) for node_item in occupied_nodes]
 
     print("\nsleep for 30sec")
     time.sleep(30)
