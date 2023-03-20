@@ -16,7 +16,8 @@ docker push projects.registry.vmware.com/kubeflow/gpu-scheduler:0.2
 kubectl delete -f gpu-scheduler.yaml 
 kubectl apply -f gpu-scheduler.yaml
 k g po -n gpu-scheduler
-kubectl logs $( kubectl get pod -n gpu-scheduler -l component=gpu-scheduler --no-headers -o custom-columns=':metadata.name' ) -n gpu-scheduler
+kubectl wait --for=condition=Ready pod/$( kubectl get pod -n gpu-scheduler -l component=gpu-scheduler --no-headers -o custom-columns=':metadata.name' ) -n gpu-scheduler --timeout=120s
+kubectl logs $( kubectl get pod -n gpu-scheduler -l component=gpu-scheduler --no-headers -o custom-columns=':metadata.name' ) -n gpu-scheduler --follow
 
 
 # for replicas 2, 0

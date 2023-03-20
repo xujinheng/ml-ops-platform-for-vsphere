@@ -47,9 +47,7 @@ data:
     schedulingMethod: first-come-first-serve
     tkc:
     - tkcNamespace: tkg-ns-auto
-      tkcName: tkc-for-gpu-scheduler-only-1
-    - tkcNamespace: tkg-ns-auto
-      tkcName: tkc-for-gpu-scheduler-only-2
+      tkcName: v1a3-v23-vgpu-v100-8c
     vmClass:
     - vgpu-v100-4c
     - vgpu-v100-8c
