@@ -1,0 +1,463 @@
+cat << EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cl-autoscaler-role
+rules:
+  - apiGroups: ["cluster.x-k8s.io"]
+    resources: ["machinedeployments", "machinedeployments/scale", "machines", "machinesets"]
+    verbs: ["update", "get", "list", "watch"]
+  - apiGroups: ["vmware.infrastructure.cluster.x-k8s.io/v1beta1"]
+    resources: ["vspheremachinetemplates"]
+    verbs: ["update", "get", "list", "watch"]
+EOF
+
+
+cat << EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tkg-role-binding
+  namespace: tkg-ns-auto
+subjects:
+  - kind: ServiceAccount
+    name: tkg-scaler-sa
+    namespace: tkg-ns-auto 
+roleRef:
+    kind: ClusterRole
+    name: cl-autoscaler-role
+    apiGroup: rbac.authorization.k8s.io
+EOF
+
+cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tkg-scaler-sa
+  namespace: tkg-ns-auto
+secrets:
+  - name: tkg-scaler-secret
+EOF
+
+cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tkg-scaler-secret
+  namespace: tkg-ns-auto
+  annotations:
+     kubernetes.io/service-account.name: tkg-scaler-sa
+type: kubernetes.io/service-account-token
+EOF
+
+
+# The script returns a kubeconfig for the service account given
+# you need to have kubectl on PATH with the context set to the cluster you want to create the config for
+
+# Cosmetics for the created config
+clusterName=10.105.150.34
+# your server address goes here get it via `kubectl cluster-info`
+server=https://10.105.150.34:6443
+# the Namespace and ServiceAccount name that is used for the config
+namespace=tkg-ns-auto
+serviceAccount=tkg-scaler-sa
+
+######################
+# actual script starts
+set -o errexit
+
+secretName=$(kubectl --namespace $namespace get serviceAccount $serviceAccount -o jsonpath='{.secrets[0].name}')
+ca=$(kubectl --namespace $namespace get secret/$secretName -o jsonpath='{.data.ca\.crt}')
+token=$(kubectl --namespace $namespace get secret/$secretName -o jsonpath='{.data.token}' | base64 --decode)
+
+echo "
+---
+apiVersion: v1
+kind: Config
+clusters:
+- name: ${clusterName}
+  cluster:
+    insecure-skip-tls-verify: true
+    server: ${server}
+contexts:
+- name: ${serviceAccount}@${clusterName}
+  context:
+    cluster: ${clusterName}
+    namespace: ${namespace}
+    user: ${serviceAccount}
+users:
+- name: ${serviceAccount}
+  user:
+    token: ${token}
+current-context: ${serviceAccount}@${clusterName}
+" > cloud-kb.conf
+
+k sh
+
+kubectl delete secret cloud-conf -n kube-system
+kubectl create secret generic cloud-conf --from-file=./cloud-kb.conf -n kube-system
+
+k sh ""
+
+md: 
+  annotate
+  replica unset
+tlc/cluster:
+  replica unset
+tkc:
+  - labels:
+      cluster-api/accelerator: GRID-V100-4C
+    name: np-4c
+    # replicas: 1
+    storageClass: k8s-storage-policy
+    tkr:
+      reference:
+        name: v1.23.8---vmware.2-tkg.2-zshippable
+    vmClass: vgpu-v100-4c
+    volumes:
+    - capacity:
+        storage: 70Gi
+      mountPath: /var/lib/containerd
+      name: containerd
+    - capacity:
+        storage: 70Gi
+      mountPath: /var/lib/kubelet
+      name: kubelet
+
+k sh
+
+cat << EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cluster-autoscaler
+  namespace: kube-system
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-workload
+rules:
+  - apiGroups:
+    - ""
+    resources:
+    - namespaces
+    - persistentvolumeclaims
+    - persistentvolumes
+    - pods
+    - replicationcontrollers
+    - services
+    verbs:
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - ""
+    resources:
+    - nodes
+    verbs:
+    - get
+    - list
+    - update
+    - watch
+  - apiGroups:
+    - ""
+    resources:
+    - pods/eviction
+    verbs:
+    - create
+  - apiGroups:
+    - policy
+    resources:
+    - poddisruptionbudgets
+    verbs:
+    - list
+    - watch
+  - apiGroups:
+    - storage.k8s.io
+    resources:
+    - csinodes
+    - storageclasses
+    - csidrivers
+    - csistoragecapacities
+    verbs:
+    - get
+    - list
+    - watch
+  - apiGroups:
+    - batch
+    resources:
+    - jobs
+    verbs:
+    - list
+    - watch
+  - apiGroups:
+    - apps
+    resources:
+    - daemonsets
+    - replicasets
+    - statefulsets
+    verbs:
+    - list
+    - watch
+  - apiGroups:
+    - ""
+    resources:
+    - events
+    verbs:
+    - create
+    - patch
+  - apiGroups:
+    - ""
+    resources:
+    - configmaps
+    verbs:
+    - create
+    - delete
+    - get
+    - update
+  - apiGroups:
+    - coordination.k8s.io
+    resources:
+    - leases
+    verbs:
+    - create
+    - get
+    - update
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: cluster-autoscaler-workload
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler-workload
+subjects:
+- kind: ServiceAccount
+  name: cluster-autoscaler
+  namespace: kube-system
+EOF
+
+
+cat << EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cluster-autoscaler-tkc-cpa
+  namespace: kube-system
+  labels:
+    app: cluster-autoscaler-tkc-cpa
+spec:
+  selector:
+    matchLabels:
+      app: cluster-autoscaler-tkc-cpa
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: cluster-autoscaler-tkc-cpa
+    spec:
+      volumes:
+      - name: cloud-config-vol
+        secret:
+           secretName: cloud-conf
+      containers:
+      - image: wcp-docker-ci.artifactory.eng.vmware.com/cluster-autoscaler-amd64:v1.23.19
+        imagePullPolicy: Always
+        name: cluster-autoscaler
+        command:
+        - /cluster-autoscaler
+        - --cloud-provider=clusterapi
+        - --address=:10000
+        - --clusterapi-cloud-config-authoritative
+        - --node-group-auto-discovery=clusterapi:clusterName=v1a3-v23-vgpu-v100-8c,namespace=tkg-ns-auto
+        - --scale-down-delay-after-add=2m
+        - --scale-down-delay-after-delete=10s
+        - --scale-down-delay-after-failure=2m
+        - --scale-down-unneeded-time=2m
+        - --max-node-provision-time=15m
+        - --scale-down-enabled=true
+        - --max-nodes-total=9
+        - --namespace=kube-system
+        - --ignore-daemonsets-utilization
+        - --v=6
+        - --cloud-config=/cloud-config-file/cloud-kb.conf
+        volumeMounts:
+        - mountPath: /cloud-config-file
+          name: cloud-config-vol
+          readOnly: true
+      hostNetwork: true
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        kubernetes.io/os: linux
+        node-role.kubernetes.io/master: ''
+      serviceAccountName: cluster-autoscaler
+      tolerations:
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+        operator: Exists
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoSchedule
+        key: kubeadmNode
+        operator: Equal
+        value: master
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 300
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 300
+EOF
+
+
+cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: application-cpu
+  labels:
+    app: application-cpu
+spec:
+  type: ClusterIP
+  selector:
+    app: application-cpu
+  ports:
+    - protocol: TCP
+      name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+   name: application-cpu
+   labels:
+     app: application-cpu
+spec:
+   selector:
+     matchLabels:
+      app: application-cpu
+   replicas: 0
+   strategy:
+     type: RollingUpdate
+     rollingUpdate:
+       maxSurge: 1
+       maxUnavailable: 0
+   template:
+     metadata:
+      labels:
+        app: application-cpu
+     spec:
+       containers:
+       - name: application-cpu
+         image: wcp-docker-ci.artifactory.eng.vmware.com/app-cpu:v1.0.0
+         imagePullPolicy: Always
+         ports:
+         - containerPort: 80
+         resources:
+           requests:
+             memory: "50Mi"
+             cpu: "2000m"
+           limits:
+             memory: "500Mi"
+             cpu: "20000m"
+EOF
+
+
+
+
+
+cat << EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: all:psp:privileged
+roleRef:
+  kind: ClusterRole
+  name: psp:vmware-system-privileged
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: Group
+  name: system:serviceaccounts
+  apiGroup: rbac.authorization.k8s.io
+- kind: Group
+  name: system:authenticated
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvidia-plugin-test-8
+  namespace: kube-system
+  labels:
+    app: nvidia-plugin-test-8
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nvidia-plugin-test-8
+  template:
+    metadata:
+      labels:
+        app: nvidia-plugin-test-8
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nvidia-plugin-test-ctr
+          image: nvcr.io/nvidia/cloud-native/gpu-operator-validator:v1.10.1
+          imagePullPolicy: IfNotPresent
+          command: ['sh', '-c']
+          args:
+            - "while true;  do vectorAdd & nvidia-smi & wait; sleep 30; done"
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+      nodeSelector: # Schedule on the node with GPU sharing enabled
+          nvidia.com/gpu.product: GRID-V100-8C
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nvidia-plugin-test-4
+  namespace: kube-system
+  labels:
+    app: nvidia-plugin-test-4
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nvidia-plugin-test-4
+  template:
+    metadata:
+      labels:
+        app: nvidia-plugin-test-4
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nvidia-plugin-test-ctr
+          image: nvcr.io/nvidia/cloud-native/gpu-operator-validator:v1.10.1
+          imagePullPolicy: IfNotPresent
+          command: ['sh', '-c']
+          args:
+            - "while true;  do vectorAdd & nvidia-smi & wait; sleep 30; done"
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+      nodeSelector: # Schedule on the node with GPU sharing enabled
+          nvidia.com/gpu.product: GRID-V100-4C
+EOF
