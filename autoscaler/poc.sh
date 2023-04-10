@@ -1,4 +1,4 @@
-cat << EOF | kubectl apply -f -
+ cat << EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -388,7 +388,9 @@ subjects:
 - kind: Group
   name: system:authenticated
   apiGroup: rbac.authorization.k8s.io
----
+EOF
+
+cat << EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -433,7 +435,7 @@ metadata:
   labels:
     app: nvidia-plugin-test-4
 spec:
-  replicas: 2
+  replicas: 0
   selector:
     matchLabels:
       app: nvidia-plugin-test-4
@@ -460,4 +462,131 @@ spec:
               nvidia.com/gpu: 1
       nodeSelector: # Schedule on the node with GPU sharing enabled
           nvidia.com/gpu.product: GRID-V100-4C
+EOF
+
+
+
+
+
+cat << EOF | kubectl apply -f -
+apiVersion: run.tanzu.vmware.com/v1alpha3
+kind: TanzuKubernetesCluster
+metadata:
+  name: jinheng-testing
+  namespace: tkg-ns-auto
+spec:
+  distribution:
+    fullVersion: v1.23.8+vmware.2-tkg.2-zshippable
+  settings:
+    network:
+      cni:
+        name: antrea
+      pods:
+        cidrBlocks:
+        - 192.0.2.0/16
+      serviceDomain: cluster.local
+      services:
+        cidrBlocks:
+        - 198.51.100.0/12
+    storage:
+      classes:
+      - k8s-storage-policy
+      defaultClass: k8s-storage-policy
+  topology:
+    controlPlane:
+      replicas: 1
+      storageClass: k8s-storage-policy
+      tkr:
+        reference:
+          name: v1.23.8---vmware.2-tkg.2-zshippable
+      vmClass: guaranteed-large
+    nodePools:
+    - labels:
+        cluster-api/accelerator: GRID-V100-8C
+      name: np-2
+      storageClass: k8s-storage-policy
+      tkr:
+        reference:
+          name: v1.23.8---vmware.2-tkg.2-zshippable
+      vmClass: vgpu-v100-8c
+      volumes:
+      - capacity:
+          storage: 70Gi
+        mountPath: /var/lib/containerd
+        name: containerd
+      - capacity:
+          storage: 70Gi
+        mountPath: /var/lib/kubelet
+        name: kubelet
+    - labels:
+        cluster-api/accelerator: GRID-V100-4C
+      name: np-4c
+      storageClass: k8s-storage-policy
+      tkr:
+        reference:
+          name: v1.23.8---vmware.2-tkg.2-zshippable
+      vmClass: vgpu-v100-4c
+      volumes:
+      - capacity:
+          storage: 70Gi
+        mountPath: /var/lib/containerd
+        name: containerd
+      - capacity:
+          storage: 70Gi
+        mountPath: /var/lib/kubelet
+        name: kubelet
+EOF
+k delete tkc jinheng-testing
+
+
+
+cat << EOF | kubectl apply -f -
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster    # We are creating a Cluster
+metadata:
+  name: clusterclass-jinheng
+  namespace: tkg-ns-auto
+spec:
+  clusterNetwork:
+    services:
+      cidrBlocks: ["198.51.100.0/12"]
+    pods:
+      cidrBlocks: ["192.0.2.0/16"]
+    serviceDomain: cluster.local
+  topology:
+    class: tanzukubernetescluster
+    version: v1.23.8---vmware.2-tkg.2-zshippable
+    controlPlane:
+      replicas: 1
+    workers:
+      machineDeployments:
+      - class: node-pool
+        name: gpuworkers     
+        metadata:
+          annotations:
+            run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
+        replicas: 1
+        variables:
+          overrides:      
+            - name: nodePoolVolumes
+              value:  
+                - name: containerd
+                  mountPath: /var/lib/containerd
+                  storageClass: k8s-storage-policy
+                  capacity:
+                    storage: 50Gi
+                - name: kubelet
+                  mountPath: /var/lib/kubelet
+                  storageClass: k8s-storage-policy
+                  capacity:
+                    storage: 50Gi
+            - name: vmClass
+              value: vgpu-v100-8c
+    variables:
+    - name: vmClass
+      value: guaranteed-large
+    - name: storageClass
+      value: "k8s-storage-policy"
+    - name: nodePoolVolumes
+      value: []
 EOF
