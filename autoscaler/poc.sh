@@ -1,4 +1,103 @@
- cat << EOF | kubectl apply -f -
+SUPERVISOR_CONTEXT=tkg-ns-auto
+CLUSTER_CONTEXT=clusterclass-jinheng
+
+kubectl config use-context ${SUPERVISOR_CONTEXT}
+
+# 1. Create Classy Cluster
+# We do not define Replicas fields according to https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/cloudprovider/clusterapi#autoscaling-with-clusterclass-and-managed-topologies
+# We define nodePoolLabels according to https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/cloudprovider/clusterapi#special-note-on-gpu-instances
+cat << EOF | kubectl apply -f -
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: clusterclass-jinheng
+  namespace: tkg-ns-auto
+spec:
+  clusterNetwork:
+    services:
+      cidrBlocks: ["198.51.100.0/12"]
+    pods:
+      cidrBlocks: ["192.0.2.0/16"]
+    serviceDomain: cluster.local
+  topology:
+    class: tanzukubernetescluster
+    version: v1.23.8---vmware.2-tkg.2-zshippable
+    variables:
+    - name: vmClass
+      value: guaranteed-large
+    - name: storageClass
+      value: k8s-storage-policy
+    - name: nodePoolLabels
+      value: []
+    - name: nodePoolVolumes
+      value: []
+    controlPlane:
+      metadata:
+        annotations:
+          run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
+      replicas: 1
+    workers:
+      machineDeployments:
+      - class: node-pool
+        name: gpuworkers-4g
+        metadata:
+          annotations:
+            run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
+        variables:
+          overrides:      
+          - name: nodePoolVolumes
+            value:  
+            - name: containerd
+              mountPath: /var/lib/containerd
+              storageClass: k8s-storage-policy
+              capacity:
+                storage: 50Gi
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+              storageClass: k8s-storage-policy
+              capacity:
+                storage: 50Gi
+          - name: vmClass
+            value: vgpu-v100-4c
+          - name: nodePoolLabels
+            value:
+            - key: cluster-api/accelerator
+              value: GRID-V100-4C
+      - class: node-pool
+        name: gpuworkers-8g
+        metadata:
+          annotations:
+            run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
+        variables:
+          overrides:      
+          - name: nodePoolVolumes
+            value:  
+            - name: containerd
+              mountPath: /var/lib/containerd
+              storageClass: k8s-storage-policy
+              capacity:
+                storage: 50Gi
+            - name: kubelet
+              mountPath: /var/lib/kubelet
+              storageClass: k8s-storage-policy
+              capacity:
+                storage: 50Gi
+          - name: vmClass
+            value: vgpu-v100-8c
+          - name: nodePoolLabels
+            value:
+            - key: cluster-api/accelerator
+              value: GRID-V100-8C
+EOF
+
+# Annotate machine deployment according to https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/cloudprovider/clusterapi#enabling-autoscaling
+kubectl annotate machinedeployment clusterclass-jinheng-gpuworkers-4g-cp85k cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size="1"
+kubectl annotate machinedeployment clusterclass-jinheng-gpuworkers-4g-cp85k cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size="4"
+kubectl annotate machinedeployment clusterclass-jinheng-gpuworkers-8g-tgsfv cluster.x-k8s.io/cluster-api-autoscaler-node-group-min-size="1"
+kubectl annotate machinedeployment clusterclass-jinheng-gpuworkers-8g-tgsfv cluster.x-k8s.io/cluster-api-autoscaler-node-group-max-size="4"
+
+# 2. Create RBAC in supervisor cluster
+cat << EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -12,7 +111,6 @@ rules:
     verbs: ["update", "get", "list", "watch"]
 EOF
 
-
 cat << EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -22,7 +120,7 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: tkg-scaler-sa
-    namespace: tkg-ns-auto 
+    namespace: tkg-ns-auto
 roleRef:
     kind: ClusterRole
     name: cl-autoscaler-role
@@ -50,6 +148,7 @@ metadata:
 type: kubernetes.io/service-account-token
 EOF
 
+# 3. Create kubeconfig used by Autoscaler to access supervisor cluster resources
 
 # The script returns a kubeconfig for the service account given
 # you need to have kubectl on PATH with the context set to the cluster you want to create the config for
@@ -64,7 +163,6 @@ serviceAccount=tkg-scaler-sa
 
 ######################
 # actual script starts
-set -o errexit
 
 secretName=$(kubectl --namespace $namespace get serviceAccount $serviceAccount -o jsonpath='{.secrets[0].name}')
 ca=$(kubectl --namespace $namespace get secret/$secretName -o jsonpath='{.data.ca\.crt}')
@@ -92,40 +190,12 @@ users:
 current-context: ${serviceAccount}@${clusterName}
 " > cloud-kb.conf
 
-k sh
+kubectl config use-context ${CLUSTER_CONTEXT}
 
 kubectl delete secret cloud-conf -n kube-system
 kubectl create secret generic cloud-conf --from-file=./cloud-kb.conf -n kube-system
 
-k sh ""
-
-md: 
-  annotate
-  replica unset
-tlc/cluster:
-  replica unset
-tkc:
-  - labels:
-      cluster-api/accelerator: GRID-V100-4C
-    name: np-4c
-    # replicas: 1
-    storageClass: k8s-storage-policy
-    tkr:
-      reference:
-        name: v1.23.8---vmware.2-tkg.2-zshippable
-    vmClass: vgpu-v100-4c
-    volumes:
-    - capacity:
-        storage: 70Gi
-      mountPath: /var/lib/containerd
-      name: containerd
-    - capacity:
-        storage: 70Gi
-      mountPath: /var/lib/kubelet
-      name: kubelet
-
-k sh
-
+# 4. Create RBAC in workload cluster
 cat << EOF | kubectl apply -f -
 ---
 apiVersion: v1
@@ -240,7 +310,7 @@ subjects:
   namespace: kube-system
 EOF
 
-
+# 5. Deploy Autoscaler
 cat << EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
@@ -272,11 +342,11 @@ spec:
         - --cloud-provider=clusterapi
         - --address=:10000
         - --clusterapi-cloud-config-authoritative
-        - --node-group-auto-discovery=clusterapi:clusterName=v1a3-v23-vgpu-v100-8c,namespace=tkg-ns-auto
-        - --scale-down-delay-after-add=2m
+        - --node-group-auto-discovery=clusterapi:clusterName=clusterclass-jinheng,namespace=tkg-ns-auto
+        - --scale-down-delay-after-add=30s
         - --scale-down-delay-after-delete=10s
         - --scale-down-delay-after-failure=2m
-        - --scale-down-unneeded-time=2m
+        - --scale-down-unneeded-time=15s
         - --max-node-provision-time=15m
         - --scale-down-enabled=true
         - --max-nodes-total=9
@@ -313,13 +383,15 @@ spec:
         operator: Exists
         tolerationSeconds: 300
 EOF
+kubectl rollout restart deployment/cluster-autoscaler-tkc-cpa
 
-
+# 6. Deploy CPU workloads
 cat << EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
   name: application-cpu
+  namespace: kube-system
   labels:
     app: application-cpu
 spec:
@@ -336,6 +408,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
    name: application-cpu
+   namespace: kube-system
    labels:
      app: application-cpu
 spec:
@@ -368,9 +441,9 @@ spec:
              cpu: "20000m"
 EOF
 
+# 7. Deploy GPU workloads
 
-
-
+./gpu_operator.sh ## Deploy GPU operators
 
 cat << EOF | kubectl apply -f -
 apiVersion: rbac.authorization.k8s.io/v1
@@ -394,26 +467,26 @@ cat << EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nvidia-plugin-test-8
+  name: application-gpu-8
   namespace: kube-system
   labels:
-    app: nvidia-plugin-test-8
+    app: application-gpu-8
 spec:
-  replicas: 2
+  replicas: 0
   selector:
     matchLabels:
-      app: nvidia-plugin-test-8
+      app: application-gpu-8
   template:
     metadata:
       labels:
-        app: nvidia-plugin-test-8
+        app: application-gpu-8
     spec:
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
       containers:
-        - name: nvidia-plugin-test-ctr
+        - name: application-gpu-ctr
           image: nvcr.io/nvidia/cloud-native/gpu-operator-validator:v1.10.1
           imagePullPolicy: IfNotPresent
           command: ['sh', '-c']
@@ -430,26 +503,26 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nvidia-plugin-test-4
+  name: application-gpu-4
   namespace: kube-system
   labels:
-    app: nvidia-plugin-test-4
+    app: application-gpu-4
 spec:
   replicas: 0
   selector:
     matchLabels:
-      app: nvidia-plugin-test-4
+      app: application-gpu-4
   template:
     metadata:
       labels:
-        app: nvidia-plugin-test-4
+        app: application-gpu-4
     spec:
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
       containers:
-        - name: nvidia-plugin-test-ctr
+        - name: application-gpu-ctr
           image: nvcr.io/nvidia/cloud-native/gpu-operator-validator:v1.10.1
           imagePullPolicy: IfNotPresent
           command: ['sh', '-c']
@@ -465,128 +538,12 @@ spec:
 EOF
 
 
+# 8. Scale workloads replicas numbers
 
+kubectl scale deployment/application-cpu --replicas=1
+kubectl scale deployment/application-gpu-4 --replicas=1
+kubectl scale deployment/application-gpu-8 --replicas=1
 
-
-cat << EOF | kubectl apply -f -
-apiVersion: run.tanzu.vmware.com/v1alpha3
-kind: TanzuKubernetesCluster
-metadata:
-  name: jinheng-testing
-  namespace: tkg-ns-auto
-spec:
-  distribution:
-    fullVersion: v1.23.8+vmware.2-tkg.2-zshippable
-  settings:
-    network:
-      cni:
-        name: antrea
-      pods:
-        cidrBlocks:
-        - 192.0.2.0/16
-      serviceDomain: cluster.local
-      services:
-        cidrBlocks:
-        - 198.51.100.0/12
-    storage:
-      classes:
-      - k8s-storage-policy
-      defaultClass: k8s-storage-policy
-  topology:
-    controlPlane:
-      replicas: 1
-      storageClass: k8s-storage-policy
-      tkr:
-        reference:
-          name: v1.23.8---vmware.2-tkg.2-zshippable
-      vmClass: guaranteed-large
-    nodePools:
-    - labels:
-        cluster-api/accelerator: GRID-V100-8C
-      name: np-2
-      storageClass: k8s-storage-policy
-      tkr:
-        reference:
-          name: v1.23.8---vmware.2-tkg.2-zshippable
-      vmClass: vgpu-v100-8c
-      volumes:
-      - capacity:
-          storage: 70Gi
-        mountPath: /var/lib/containerd
-        name: containerd
-      - capacity:
-          storage: 70Gi
-        mountPath: /var/lib/kubelet
-        name: kubelet
-    - labels:
-        cluster-api/accelerator: GRID-V100-4C
-      name: np-4c
-      storageClass: k8s-storage-policy
-      tkr:
-        reference:
-          name: v1.23.8---vmware.2-tkg.2-zshippable
-      vmClass: vgpu-v100-4c
-      volumes:
-      - capacity:
-          storage: 70Gi
-        mountPath: /var/lib/containerd
-        name: containerd
-      - capacity:
-          storage: 70Gi
-        mountPath: /var/lib/kubelet
-        name: kubelet
-EOF
-k delete tkc jinheng-testing
-
-
-
-cat << EOF | kubectl apply -f -
-apiVersion: cluster.x-k8s.io/v1beta1
-kind: Cluster    # We are creating a Cluster
-metadata:
-  name: clusterclass-jinheng
-  namespace: tkg-ns-auto
-spec:
-  clusterNetwork:
-    services:
-      cidrBlocks: ["198.51.100.0/12"]
-    pods:
-      cidrBlocks: ["192.0.2.0/16"]
-    serviceDomain: cluster.local
-  topology:
-    class: tanzukubernetescluster
-    version: v1.23.8---vmware.2-tkg.2-zshippable
-    controlPlane:
-      replicas: 1
-    workers:
-      machineDeployments:
-      - class: node-pool
-        name: gpuworkers     
-        metadata:
-          annotations:
-            run.tanzu.vmware.com/resolve-os-image: os-name=ubuntu
-        replicas: 1
-        variables:
-          overrides:      
-            - name: nodePoolVolumes
-              value:  
-                - name: containerd
-                  mountPath: /var/lib/containerd
-                  storageClass: k8s-storage-policy
-                  capacity:
-                    storage: 50Gi
-                - name: kubelet
-                  mountPath: /var/lib/kubelet
-                  storageClass: k8s-storage-policy
-                  capacity:
-                    storage: 50Gi
-            - name: vmClass
-              value: vgpu-v100-8c
-    variables:
-    - name: vmClass
-      value: guaranteed-large
-    - name: storageClass
-      value: "k8s-storage-policy"
-    - name: nodePoolVolumes
-      value: []
-EOF
+# in supervisor cluster, you can check md replicas by 
+kubectl config use-context ${SUPERVISOR_CONTEXT}
+watch "kubectl get md | grep jinheng"
